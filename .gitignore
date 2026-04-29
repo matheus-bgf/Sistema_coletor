@@ -1,0 +1,17 @@
+# Arquivos de ambiente
+.env
+.env.local
+.env.*.local
+
+# Diretórios de cache
+.wwebjs_auth/
+.wwebjs_cache/
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Cache e outros arquivos temporários
+cache_*.json
