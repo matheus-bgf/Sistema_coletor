@@ -75,7 +75,7 @@ pub fn start_wazuh_listener(
 ) {
 
     let path =
-        "/var/ossec/queue/alerts/alerts.json";
+        "/var/ossec/logs/alerts/alerts.json";
 
     while running.load(
         Ordering::Relaxed
