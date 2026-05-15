@@ -1,13 +1,24 @@
 /*
- * Bibliotecas necessárias
+ * Bibliotecas externas
  */
-use std::collections::HashMap;
+use dashmap::DashMap;
 
+use lazy_static::lazy_static;
+
+use serde_json::Value;
+
+use reqwest::blocking::Client;
+
+/*
+ * Bibliotecas padrão
+ */
 use std::fs::OpenOptions;
 
 use std::io::{
     BufRead,
-    BufReader
+    BufReader,
+    Seek,
+    SeekFrom
 };
 
 use std::thread;
@@ -27,14 +38,8 @@ use std::sync::{
     Mutex
 };
 
-use lazy_static::lazy_static;
-
-use serde_json::Value;
-
-use reqwest::blocking::Client;
-
 /*
- * Controle do listener
+ * Estruturas globais
  */
 lazy_static! {
 
@@ -46,254 +51,35 @@ lazy_static! {
             Mutex::new(None);
 
     /*
-     * Cache:
-     * rule.id -> último envio
+     * Cache de deduplicação
      */
     static ref SENT_ALERTS:
-        Mutex<HashMap<String, Instant>> =
-            Mutex::new(HashMap::new());
+        DashMap<String, Instant> =
+            DashMap::new();
 
     /*
-     * HTTP client global
+     * Controle da última limpeza
+     */
+    static ref LAST_CLEANUP:
+        Mutex<Instant> =
+            Mutex::new(Instant::now());
+
+    /*
+     * Cliente HTTP reutilizável
      */
     static ref HTTP_CLIENT: Client =
         Client::builder()
             .timeout(
                 Duration::from_secs(5)
             )
+            .pool_idle_timeout(
+                Duration::from_secs(30)
+            )
+            .pool_max_idle_per_host(10)
             .build()
             .expect(
-                "Falha ao criar HTTP client"
+                "Falha ao criar HTTP Client"
             );
-}
-
-/*
- * Função que busca erros ao localizar o arquivo
- */
-pub fn start_wazuh_listener(
-    running: Arc<AtomicBool>
-) {
-
-    let path =
-        "/var/ossec/logs/alerts/alerts.json";
-
-    while running.load(
-        Ordering::Relaxed
-    ) {
-
-        match open_stream(path) {
-
-            Ok(_) => {
-
-                eprintln!(
-                    "[Wazuh] Stream encerrado inesperadamente. Reconectando..."
-                );
-
-                thread::sleep(
-                    Duration::from_secs(1)
-                );
-            }
-
-            Err(e) => {
-
-                eprintln!(
-                    "[Wazuh] Erro ao abrir stream: {}",
-                    e
-                );
-
-                thread::sleep(
-                    Duration::from_secs(2)
-                );
-            }
-        }
-    }
-}
-
-/*
- * Faz leitura contínua do alerts.json
- */
-fn open_stream(
-    path: &str
-) -> std::io::Result<()> {
-
-    let file =
-        OpenOptions::new()
-            .read(true)
-            .open(path)?;
-
-    let reader =
-        BufReader::new(file);
-
-    eprintln!(
-        "[Wazuh] Escutando {}",
-        path
-    );
-
-    for line in reader.lines() {
-
-        match line {
-
-            Ok(l) => {
-
-                if !l.is_empty() {
-
-                    handle_event(&l);
-                }
-            }
-
-            Err(e) => {
-
-                eprintln!(
-                    "[Wazuh] Erro ao ler a linha: {}",
-                    e
-                );
-
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/*
- * Processa evento
- */
-fn handle_event(
-    line: &str
-) {
-
-    let parsed: Value =
-        match serde_json::from_str(line) {
-
-            Ok(v) => v,
-
-            Err(_) => return,
-        };
-
-    /*
-     * rule.level
-     */
-    let level =
-        parsed["rule"]["level"]
-            .as_i64()
-            .unwrap_or(0);
-
-    /*
-     * Ignora alertas baixos
-     */
-    if level < 3 {
-
-        return;
-    }
-
-    /*
-     * rule.id
-     */
-    let rule_id =
-        parsed["rule"]["id"]
-            .as_str()
-            .unwrap_or("unknown");
-
-    /*
-     * Controle anti-duplicação
-     * baseado apenas em rule.id
-     */
-    let now =
-        Instant::now();
-
-    {
-        let cache =
-            SENT_ALERTS
-                .lock()
-                .unwrap();
-
-        if let Some(last_sent) =
-            cache.get(rule_id)
-        {
-
-            /*
-             * 3 horas
-             */
-            if now.duration_since(
-                *last_sent
-            ) < Duration::from_secs(
-                60 * 60 * 3
-            ) {
-
-                eprintln!(
-                    "[Wazuh] Rule {} ignorada (menos de 3h)",
-                    rule_id
-                );
-
-                return;
-            }
-        }
-    }
-
-    /*
-     * Envia alerta
-     */
-    let res =
-        HTTP_CLIENT
-            .post(
-                "http://localhost:10080/alert"
-            )
-            .header(
-                "Content-Type",
-                "application/json"
-            )
-            .body(
-                line.to_string()
-            )
-            .send();
-
-    match res {
-
-        Ok(_) => {
-
-            /*
-             * Atualiza cache
-             */
-            {
-                let mut cache =
-                    SENT_ALERTS
-                        .lock()
-                        .unwrap();
-
-                cache.insert(
-                    rule_id.to_string(),
-                    now
-                );
-
-                /*
-                 * Remove entradas antigas
-                 */
-                cache.retain(
-                    |_, instant| {
-
-                        now.duration_since(
-                            *instant
-                        ) < Duration::from_secs(
-                            60 * 60 * 6
-                        )
-                    }
-                );
-            }
-
-            eprintln!(
-                "[Wazuh] Alerta enviado com sucesso"
-            );
-        }
-
-        Err(e) => {
-
-            eprintln!(
-                "[Wazuh] Erro ao enviar alerta {}",
-                e
-            );
-        }
-    }
 }
 
 /*
@@ -301,11 +87,17 @@ fn handle_event(
  */
 pub fn start() {
 
+    /*
+     * Flag de execução
+     */
     let running =
         Arc::new(
             AtomicBool::new(true)
         );
 
+    /*
+     * Salva referência global
+     */
     {
         let mut guard =
             RUNNING
@@ -318,6 +110,9 @@ pub fn start() {
             );
     }
 
+    /*
+     * Inicia thread do listener
+     */
     thread::spawn(move || {
 
         start_wazuh_listener(
@@ -331,7 +126,7 @@ pub fn start() {
 }
 
 /*
- * Para listener
+ * Finaliza listener
  */
 pub fn stop() {
 
@@ -344,6 +139,9 @@ pub fn stop() {
         guard.as_ref()
     {
 
+        /*
+         * Envia sinal de parada
+         */
         running.store(
             false,
             Ordering::Relaxed
@@ -353,4 +151,132 @@ pub fn stop() {
             "[Wazuh] Sinal de parada enviado"
         );
     }
+}
+
+/*
+ * Loop principal do listener
+ */
+pub fn start_wazuh_listener(
+    running: Arc<AtomicBool>
+) {
+
+    /*
+     * Caminho do alerts.json
+     */
+    let path =
+        "/var/ossec/logs/alerts/alerts.json";
+
+    while running.load(
+        Ordering::Relaxed
+    ) {
+
+        match open_stream(path) {
+
+            Ok(_) => {
+
+                eprintln!(
+                    "[Wazuh] Stream encerrado. Reconectando..."
+                );
+
+                thread::sleep(
+                    Duration::from_secs(5)
+                );
+            }
+
+            Err(e) => {
+
+                eprintln!(
+                    "[Wazuh] Erro ao abrir stream: {}",
+                    e
+                );
+
+                thread::sleep(
+                    Duration::from_secs(5)
+                );
+            }
+        }
+    }
+}
+
+/*
+ * Abre stream contínuo do alerts.json
+ */
+fn open_stream(
+    path: &str
+) -> std::io::Result<()> {
+
+    /*
+     * Abre arquivo
+     */
+    let mut file =
+        OpenOptions::new()
+            .read(true)
+            .open(path)?;
+
+    /*
+     * Move cursor para o final
+     * evitando releitura completa
+     */
+    file.seek(
+        SeekFrom::End(0)
+    )?;
+
+    /*
+     * Cria reader
+     */
+    let mut reader =
+        BufReader::new(file);
+
+    eprintln!(
+        "[Wazuh] Escutando {}",
+        path
+    );
+
+    loop {
+
+        let mut line =
+            String::new();
+
+        match reader.read_line(&mut line) {
+
+            /*
+             * Sem novas linhas
+             */
+            Ok(0) => {
+
+                thread::sleep(
+                    Duration::from_millis(200)
+                );
+            }
+
+            /*
+             * Linha recebida
+             */
+            Ok(_) => {
+
+                let line =
+                    line.trim();
+
+                if !line.is_empty() {
+
+                    handle_event(line);
+                }
+            }
+
+            /*
+             * Erro de leitura
+             */
+            Err(e) => {
+
+                eprintln!(
+                    "[Wazuh] Erro ao ler linha: {}",
+                    e
+                );
+
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
