@@ -5,9 +5,14 @@ use dashmap::DashMap;
 
 use lazy_static::lazy_static;
 
-use serde_json::Value;
+use serde_json::{
+    Value,
+    json
+};
 
 use reqwest::blocking::Client;
+
+use chrono::Utc;
 
 /*
  * Bibliotecas padrão
@@ -128,6 +133,10 @@ pub fn start() {
         start_wazuh_listener(
             running
         );
+
+        println!(
+            "Gari Wazuh apostos"
+        );
     });
 }
 
@@ -214,7 +223,9 @@ fn open_stream(
         let mut line =
             String::new();
 
-        match reader.read_line(&mut line) {
+        match reader.read_line(
+            &mut line
+        ) {
 
             Ok(0) => {
 
@@ -339,7 +350,9 @@ fn handle_event(
      * Verifica duplicação
      */
     if let Some(last_sent) =
-        SENT_ALERTS.get(&dedupe_key)
+        SENT_ALERTS.get(
+            &dedupe_key
+        )
     {
 
         if now.duration_since(
@@ -351,6 +364,38 @@ fn handle_event(
             return;
         }
     }
+
+    /*
+     * Payload enriquecido
+     */
+    let payload =
+        json!({
+
+            "client": {
+                "name": "ELSYS",
+                "group_id": "120363425917403523@g.us",
+                "channel": "whatsapp"
+            },
+
+            "machine": {
+                "ip": "192.168.127.4",
+                "hostname": "VM-WAZUH-ELSYS"
+            },
+
+            /*
+             * ALERTA ORIGINAL
+             */
+            "alert": parsed,
+
+            "meta": {
+                "source": "wazuh",
+                "forwarder": "aasm",
+                "version": 1,
+                "received_at":
+                    Utc::now()
+                        .to_rfc3339()
+            }
+        });
 
     /*
      * Envia alerta
@@ -365,7 +410,7 @@ fn handle_event(
                 "application/json"
             )
             .body(
-                String::from(line)
+                payload.to_string()
             )
             .send();
 
@@ -412,8 +457,9 @@ fn cleanup_cache(
     /*
      * Só limpa a cada 10 minutos
      */
-    if now.duration_since(*cleanup)
-        < Duration::from_secs(600)
+    if now.duration_since(
+        *cleanup
+    ) < Duration::from_secs(600)
     {
 
         return;
@@ -422,10 +468,11 @@ fn cleanup_cache(
     SENT_ALERTS.retain(
         |_, instant| {
 
-            now.duration_since(*instant)
-                < Duration::from_secs(
-                    60 * 60 * 6
-                )
+            now.duration_since(
+                *instant
+            ) < Duration::from_secs(
+                60 * 60 * 6
+            )
         }
     );
 
