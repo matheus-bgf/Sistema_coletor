@@ -174,7 +174,7 @@ pub fn start_wazuh_listener(
             Err(e) => {
 
                 eprintln!(
-                    "[Wazuh] ERRO STREAM: {}.",
+                    "[Wazuh] ERRO STREAM: {}",
                     e
                 );
 
@@ -288,10 +288,6 @@ fn handle_event(
             Ok(v) => v,
 
             Err(_) => {
-
-                eprintln!(
-                    "[Wazuh] JSON INVALIDO"
-                );
 
                 return;
             }
