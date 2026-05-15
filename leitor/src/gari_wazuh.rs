@@ -174,7 +174,7 @@ pub fn start_wazuh_listener(
             Err(e) => {
 
                 eprintln!(
-                    "[Wazuh] ERRO STREAM: {}",
+                    "[Wazuh] ERRO STREAM: {}.",
                     e
                 );
 
@@ -437,4 +437,4 @@ fn cleanup_cache(
     );
 
     *cleanup = now;
-}rt
+}
