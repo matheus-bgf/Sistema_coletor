@@ -39,6 +39,25 @@ use std::sync::{
 };
 
 /*
+ * Controle de logs
+ */
+const DEBUG_LOGS: bool = false;
+
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        if DEBUG_LOGS {
+            println!($($arg)*);
+        }
+    };
+}
+
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
+
+/*
  * Estruturas globais
  */
 lazy_static! {
@@ -87,17 +106,11 @@ lazy_static! {
  */
 pub fn start() {
 
-    /*
-     * Flag de execução
-     */
     let running =
         Arc::new(
             AtomicBool::new(true)
         );
 
-    /*
-     * Salva referência global
-     */
     {
         let mut guard =
             RUNNING
@@ -110,9 +123,6 @@ pub fn start() {
             );
     }
 
-    /*
-     * Inicia thread do listener
-     */
     thread::spawn(move || {
 
         start_wazuh_listener(
@@ -135,9 +145,6 @@ pub fn stop() {
         guard.as_ref()
     {
 
-        /*
-         * Envia sinal de parada
-         */
         running.store(
             false,
             Ordering::Relaxed
@@ -152,9 +159,6 @@ pub fn start_wazuh_listener(
     running: Arc<AtomicBool>
 ) {
 
-    /*
-     * Caminho do alerts.json
-     */
     let path =
         "/var/ossec/logs/alerts/alerts.json";
 
@@ -173,7 +177,7 @@ pub fn start_wazuh_listener(
 
             Err(e) => {
 
-                eprintln!(
+                log_error!(
                     "[Wazuh] ERRO STREAM: {}",
                     e
                 );
@@ -193,25 +197,15 @@ fn open_stream(
     path: &str
 ) -> std::io::Result<()> {
 
-    /*
-     * Abre arquivo
-     */
     let mut file =
         OpenOptions::new()
             .read(true)
             .open(path)?;
 
-    /*
-     * Move cursor para o final
-     * evitando releitura completa
-     */
     file.seek(
         SeekFrom::End(0)
     )?;
 
-    /*
-     * Cria reader
-     */
     let mut reader =
         BufReader::new(file);
 
@@ -222,9 +216,6 @@ fn open_stream(
 
         match reader.read_line(&mut line) {
 
-            /*
-             * Sem novas linhas
-             */
             Ok(0) => {
 
                 thread::sleep(
@@ -232,9 +223,6 @@ fn open_stream(
                 );
             }
 
-            /*
-             * Linha recebida
-             */
             Ok(_) => {
 
                 let line =
@@ -246,12 +234,9 @@ fn open_stream(
                 }
             }
 
-            /*
-             * Erro de leitura
-             */
             Err(e) => {
 
-                eprintln!(
+                log_error!(
                     "[Wazuh] ERRO STREAM: {}",
                     e
                 );
@@ -315,7 +300,8 @@ fn handle_event(
     let rule_id =
         parsed["rule"]["id"]
             .as_str()
-            .unwrap_or("unknown");
+            .unwrap_or("")
+            .trim();
 
     /*
      * Agent name
@@ -323,7 +309,18 @@ fn handle_event(
     let agent_name =
         parsed["agent"]["name"]
             .as_str()
-            .unwrap_or("unknown");
+            .unwrap_or("")
+            .trim();
+
+    /*
+     * Ignora eventos inválidos
+     */
+    if rule_id.is_empty()
+        || agent_name.is_empty()
+    {
+
+        return;
+    }
 
     /*
      * Chave de dedupe
@@ -383,7 +380,7 @@ fn handle_event(
 
             cleanup_cache(now);
 
-            eprintln!(
+            log_info!(
                 "[Wazuh] ALERTA ENVIADO | Rule: {} | Agent: {}",
                 rule_id,
                 agent_name
@@ -392,7 +389,7 @@ fn handle_event(
 
         Err(e) => {
 
-            eprintln!(
+            log_error!(
                 "[Wazuh] ERRO AO ENVIAR ALERTA: {}",
                 e
             );
