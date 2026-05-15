@@ -119,10 +119,6 @@ pub fn start() {
             running
         );
     });
-
-    eprintln!(
-        "[Wazuh] Listener iniciado"
-    );
 }
 
 /*
@@ -145,10 +141,6 @@ pub fn stop() {
         running.store(
             false,
             Ordering::Relaxed
-        );
-
-        eprintln!(
-            "[Wazuh] Sinal de parada enviado"
         );
     }
 }
@@ -174,10 +166,6 @@ pub fn start_wazuh_listener(
 
             Ok(_) => {
 
-                eprintln!(
-                    "[Wazuh] Stream encerrado. Reconectando..."
-                );
-
                 thread::sleep(
                     Duration::from_secs(5)
                 );
@@ -186,7 +174,7 @@ pub fn start_wazuh_listener(
             Err(e) => {
 
                 eprintln!(
-                    "[Wazuh] Erro ao abrir stream: {}",
+                    "[Wazuh] ERRO STREAM: {}",
                     e
                 );
 
@@ -227,11 +215,6 @@ fn open_stream(
     let mut reader =
         BufReader::new(file);
 
-    eprintln!(
-        "[Wazuh] Escutando {}",
-        path
-    );
-
     loop {
 
         let mut line =
@@ -269,7 +252,7 @@ fn open_stream(
             Err(e) => {
 
                 eprintln!(
-                    "[Wazuh] Erro ao ler linha: {}",
+                    "[Wazuh] ERRO STREAM: {}",
                     e
                 );
 
@@ -279,4 +262,179 @@ fn open_stream(
     }
 
     Ok(())
+}
+
+/*
+ * Processa eventos
+ */
+fn handle_event(
+    line: &str
+) {
+
+    /*
+     * Filtro rápido
+     */
+    if !line.contains("\"rule\"") {
+
+        return;
+    }
+
+    /*
+     * Parse JSON tolerante
+     */
+    let parsed: Value =
+        match serde_json::from_str(line) {
+
+            Ok(v) => v,
+
+            Err(_) => {
+
+                eprintln!(
+                    "[Wazuh] JSON INVALIDO"
+                );
+
+                return;
+            }
+        };
+
+    /*
+     * Nível
+     */
+    let level =
+        parsed["rule"]["level"]
+            .as_i64()
+            .unwrap_or(0);
+
+    /*
+     * Ignora alertas baixos
+     */
+    if level < 3 {
+
+        return;
+    }
+
+    /*
+     * Rule ID
+     */
+    let rule_id =
+        parsed["rule"]["id"]
+            .as_str()
+            .unwrap_or("unknown");
+
+    /*
+     * Agent name
+     */
+    let agent_name =
+        parsed["agent"]["name"]
+            .as_str()
+            .unwrap_or("unknown");
+
+    /*
+     * Chave de dedupe
+     */
+    let dedupe_key =
+        format!(
+            "{}:{}",
+            rule_id,
+            agent_name
+        );
+
+    let now =
+        Instant::now();
+
+    /*
+     * Verifica duplicação
+     */
+    if let Some(last_sent) =
+        SENT_ALERTS.get(&dedupe_key)
+    {
+
+        if now.duration_since(
+            *last_sent
+        ) < Duration::from_secs(
+            60 * 60 * 3
+        ) {
+
+            return;
+        }
+    }
+
+    /*
+     * Envia alerta
+     */
+    let res =
+        HTTP_CLIENT
+            .post(
+                "http://localhost:10080/alert"
+            )
+            .header(
+                "Content-Type",
+                "application/json"
+            )
+            .body(
+                String::from(line)
+            )
+            .send();
+
+    match res {
+
+        Ok(_) => {
+
+            SENT_ALERTS.insert(
+                dedupe_key,
+                now
+            );
+
+            cleanup_cache(now);
+
+            eprintln!(
+                "[Wazuh] ALERTA ENVIADO | Rule: {} | Agent: {}",
+                rule_id,
+                agent_name
+            );
+        }
+
+        Err(e) => {
+
+            eprintln!(
+                "[Wazuh] ERRO AO ENVIAR ALERTA: {}",
+                e
+            );
+        }
+    }
+}
+
+/*
+ * Limpeza periódica do cache
+ */
+fn cleanup_cache(
+    now: Instant
+) {
+
+    let mut cleanup =
+        LAST_CLEANUP
+            .lock()
+            .unwrap();
+
+    /*
+     * Só limpa a cada 10 minutos
+     */
+    if now.duration_since(*cleanup)
+        < Duration::from_secs(600)
+    {
+
+        return;
+    }
+
+    SENT_ALERTS.retain(
+        |_, instant| {
+
+            now.duration_since(*instant)
+                < Duration::from_secs(
+                    60 * 60 * 6
+                )
+        }
+    );
+
+    *cleanup = now;
 }
