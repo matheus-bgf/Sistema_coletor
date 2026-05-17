@@ -12,6 +12,8 @@ use serde_json::{
 
 use reqwest::blocking::Client;
 
+use chrono::Utc;
+
 /*
  * Bibliotecas padrão
  */
@@ -303,159 +305,222 @@ fn open_stream(
 }
 
 /*
- * Processa evento
+ * Processa eventos
  */
-fn handle_event(line: &str) {
+fn handle_event(
+    line: &str
+) {
 
+    /*
+     * Filtro rápido
+     */
+    if !line.contains("\"rule\"") {
+
+        return;
+    }
+
+    /*
+     * Parse JSON tolerante
+     */
     let parsed: Value =
         match serde_json::from_str(line) {
 
             Ok(v) => v,
 
-            Err(e) => {
-
-                log_error!(
-                    "[Wazuh] JSON inválido: {}",
-                    e
-                );
+            Err(_) => {
 
                 return;
             }
         };
 
+    /*
+     * Nível
+     */
+    let level =
+        parsed["rule"]["level"]
+            .as_i64()
+            .unwrap_or(0);
+
+    /*
+     * Ignora alertas baixos
+     */
+    if level < 3 {
+
+        return;
+    }
+
+    /*
+     * Rule ID
+     */
     let rule_id =
         parsed["rule"]["id"]
             .as_str()
-            .unwrap_or("unknown");
+            .unwrap_or("")
+            .trim();
 
+    /*
+     * Agent name
+     */
     let agent_name =
         parsed["agent"]["name"]
             .as_str()
-            .unwrap_or("unknown");
+            .unwrap_or("")
+            .trim();
 
-    let dedup_key =
+    /*
+     * Ignora eventos inválidos
+     */
+    if rule_id.is_empty()
+        || agent_name.is_empty()
+    {
+
+        return;
+    }
+
+    /*
+     * Chave de dedupe
+     */
+    let dedupe_key =
         format!(
             "{}:{}",
             rule_id,
             agent_name
         );
 
-    if is_duplicate(&dedup_key) {
+    let now =
+        Instant::now();
 
-        log_info!(
-            "[Wazuh] ALERTA DUPLICADO IGNORADO: {}",
-            dedup_key
-        );
+    /*
+     * Verifica duplicação
+     */
+    if let Some(last_sent) =
+        SENT_ALERTS.get(
+            &dedupe_key
+        )
+    {
 
-        return;
-    }
+        if now.duration_since(
+            *last_sent
+        ) < Duration::from_secs(
+            DEDUP_TTL_SECONDS
+        ) {
 
-    cleanup_old_entries();
-
-    send_to_n8n(parsed);
-}
-
-/*
- * Verifica duplicidade
- */
-fn is_duplicate(key: &str) -> bool {
-
-    let now = Instant::now();
-
-    if let Some(entry) = SENT_ALERTS.get(key) {
-
-        /*
-         * Ignora alertas repetidos
-         * dentro de 1 hora
-         */
-        if now.duration_since(*entry.value())
-            < Duration::from_secs(DEDUP_TTL_SECONDS)
-        {
-            return true;
+            return;
         }
     }
 
-    SENT_ALERTS.insert(
-        key.to_string(),
-        now
-    );
+    /*
+     * Payload enriquecido
+     */
+    let payload =
+        json!({
 
-    false
-}
+            "client": {
+                "name": "ELSYS",
+                "group_id": "120363425917403523@g.us",
+                "channel": "whatsapp"
+            },
 
-/*
- * Limpa cache antigo
- */
-fn cleanup_old_entries() {
+            "machine": {
+                "ip": "192.168.127.4",
+                "hostname": "VM-WAZUH-ELSYS"
+            },
 
-    let mut last_cleanup =
-        LAST_CLEANUP
-            .lock()
-            .unwrap();
+            /*
+             * ALERTA ORIGINAL
+             */
+            "alert": parsed,
+
+            "meta": {
+                "source": "wazuh",
+                "forwarder": "aasm",
+                "version": 1,
+                "received_at":
+                    Utc::now()
+                        .to_rfc3339()
+            }
+        });
 
     /*
-     * Executa limpeza
-     * apenas a cada 1 hora
+     * Envia alerta
      */
-    if last_cleanup.elapsed()
-        < Duration::from_secs(DEDUP_TTL_SECONDS)
-    {
-        return;
-    }
+    let res =
+        HTTP_CLIENT
+            .post(
+                "http://localhost:10080/alert"
+            )
+            .header(
+                "Content-Type",
+                "application/json"
+            )
+            .body(
+                payload.to_string()
+            )
+            .send();
 
-    let now = Instant::now();
+    match res {
 
-    SENT_ALERTS.retain(|_, v| {
+        Ok(_) => {
 
-        /*
-         * Mantém entradas
-         * por até 1 hora
-         */
-        now.duration_since(*v)
-            < Duration::from_secs(DEDUP_TTL_SECONDS)
-    });
+            SENT_ALERTS.insert(
+                dedupe_key,
+                now
+            );
 
-    *last_cleanup = Instant::now();
-}
-
-/*
- * Envia para n8n
- */
-fn send_to_n8n(payload: Value) {
-
-    let webhook_url =
-        std::env::var("N8N_WEBHOOK")
-            .unwrap_or_default();
-
-    if webhook_url.is_empty() {
-
-        log_error!(
-            "[Wazuh] N8N_WEBHOOK não definido"
-        );
-
-        return;
-    }
-
-    match HTTP_CLIENT
-        .post(&webhook_url)
-        .json(&payload)
-        .send()
-    {
-
-        Ok(response) => {
+            cleanup_cache(now);
 
             log_info!(
-                "[Wazuh] Evento enviado: {}",
-                response.status()
+                "[Wazuh] ALERTA ENVIADO | Rule: {} | Agent: {}",
+                rule_id,
+                agent_name
             );
         }
 
         Err(e) => {
 
             log_error!(
-                "[Wazuh] Falha envio n8n: {}",
+                "[Wazuh] ERRO AO ENVIAR ALERTA: {}",
                 e
             );
         }
     }
+}
+
+/*
+ * Limpeza periódica do cache
+ */
+fn cleanup_cache(
+    now: Instant
+) {
+
+    let mut cleanup =
+        LAST_CLEANUP
+            .lock()
+            .unwrap();
+
+    /*
+     * Só limpa a cada 1 hora
+     */
+    if now.duration_since(
+        *cleanup
+    ) < Duration::from_secs(
+        DEDUP_TTL_SECONDS
+    )
+    {
+
+        return;
+    }
+
+    SENT_ALERTS.retain(
+        |_, instant| {
+
+            now.duration_since(
+                *instant
+            ) < Duration::from_secs(
+                DEDUP_TTL_SECONDS
+            )
+        }
+    );
+
+    *cleanup = now;
 }
