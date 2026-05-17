@@ -18,6 +18,24 @@ app.use(express.json({ limit: '10mb'}));
 const CLIENT_NAME = process.env.CLIENT_NAME;
 const CLIENT_GROUP_ID = process.env.CLIENT_GROUP_ID;
 const CLIENT_CHANNEL = process.env.CLIENT_CHANNEL;
+
+/**
+ * Email principal
+ */
+const CLIENT_PRIMARY_EMAIL = process.env.CLIENT_PRIMARY_EMAIL;
+
+/**
+ * Emails de cópia separados por vírgula
+ * Exemplo:
+ * email1@empresa.com,email2@empresa.com
+ */
+const CLIENT_CC_EMAILS = process.env.CLIENT_CC_EMAILS
+    ? process.env.CLIENT_CC_EMAILS
+        .split(',')
+        .map(email => email.trim())
+        .filter(email => email.length > 0)
+    : [];
+
 const API_URL = process.env.API_URL;
 const API_TOKEN = process.env.API_TOKEN;
 const WAZUH_MIN_LVL = parseInt(process.env.WAZUH_MIN_LVL) || 3;
@@ -35,13 +53,45 @@ function getLocalIP(){
             }
         }
     }
+
     return '0.0.0.0';
+}
+
+/**
+ * ===== Formatação de Data =====
+ */
+function formatDateBR(dateString){
+
+    const date = new Date(dateString);
+
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+
+    return `${day}/${month}/${year} ${hours}:${minutes}`;
 }
 
 /**
  * ===== Endpoints =====
  */
 app.post('/alert', async (req, res)=> {
+
+    const validation = validadeInput(req.body);
+
+    if (!validation.valid){
+        return res.status(400).json({
+            ok:false,
+            error: validation.reason
+        });
+    }
+
+    if (!shouldProcess(req.body)){
+        return res.status(204).send();
+    }
+
     const payload = createPayload(req.body);
 
     console.log('📦 Payload pronto', JSON.stringify(payload, null, 2));
@@ -56,12 +106,15 @@ app.post('/alert', async (req, res)=> {
         'x-nonce': nonce,
         'x-signature': signature,
     };
+
     try{
+
         const response = await sendToN8N(payload, headers);
 
         console.log('ℹ️ Resposta do n8n:', response.status, response.body);
 
         if (response.status >= 200 && response.status < 300){
+
             return res.status(200).json({
                 ok:true,
                 forwarded: true,
@@ -78,6 +131,7 @@ app.post('/alert', async (req, res)=> {
         });
 
     }catch (err){
+
         console.error("ℹ️ Falha ao enviar para n8n:",err.message);
 
         return res.status(500).json({
@@ -91,39 +145,64 @@ app.post('/alert', async (req, res)=> {
  * ===== Validação de Input =====
  */
 function validadeInput(body){
-    if (!body) return{valid:false, reason:'empty_body'};
 
-    if (!body.rule || typeof body.rule.level === 'undefined'){
-        return {valid:false, reason: 'missing_rule_level'};
+    if (!body){
+        return{
+            valid:false,
+            reason:'empty_body'
+        };
     }
 
-    return {valid:true};
+    if (!body.rule || typeof body.rule.level === 'undefined'){
+        return {
+            valid:false,
+            reason: 'missing_rule_level'
+        };
+    }
+
+    return {
+        valid:true
+    };
 }
 
 /**
  * ==== Regras de processamento =====
  */
 function shouldProcess(alert){
-    return alert.rule.level >= WAZUH_MIN_LVL;
+    return Number(alert.rule.level) >= WAZUH_MIN_LVL;
 }
 
 /**
  * ==== Função payload =====
  */
 function createPayload(alert){
+
     return{
+
         client:{
             name: CLIENT_NAME,
             group_id: CLIENT_GROUP_ID,
             channel: CLIENT_CHANNEL,
+            token: API_TOKEN,
+
+            primary_email: CLIENT_PRIMARY_EMAIL,
+
+            cc_emails: CLIENT_CC_EMAILS,
         },
+
         machine:{
             ip: getLocalIP(),
             hostname: os.hostname(),
         },
+
         alert: alert,
+
         meta:{
             receivedAt: new Date().toISOString(),
+
+            alert_time: alert.timestamp
+                ? formatDateBR(alert.timestamp)
+                : formatDateBR(new Date().toISOString()),
         }
     };
 }
@@ -132,6 +211,7 @@ function createPayload(alert){
  * ==== Assinatura =====
  */
 function generateSignature(payload, timestamp, nonce){
+
     const data = JSON.stringify(payload) + timestamp + nonce;
 
     return crypto
@@ -144,7 +224,9 @@ function generateSignature(payload, timestamp, nonce){
  * ==== Envio para n8n =====
  */
 function sendToN8N(payload, headers){
+
     return new Promise((resolve,reject) =>{
+
         const url = new URL(API_URL);
 
         const options = {
@@ -152,24 +234,30 @@ function sendToN8N(payload, headers){
             port: url.port || (url.protocol === 'https:' ? 443 : 80),
             path: url.pathname,
             method: 'POST',
+
             headers:{
                 'Content-Type': 'application/json',
                 ...headers,
             }
         };
+
         const client = url.protocol === 'https:' ? https : http;
 
         const req = client.request(options, (res) => {
+
             let data = '';
 
             res.on('data',chunk => data += chunk);
+
             res.on('end', () => {
+
                 resolve({
                     status: res.statusCode,
                     body:data
                 });
             });
         });
+
         req.on('error', reject);
 
         req.write(JSON.stringify(payload));
@@ -182,4 +270,4 @@ function sendToN8N(payload, headers){
  */
 app.listen(10080,() => {
     console.log('🖥️ Servidor rodando na porta 10080');
-})
+});
