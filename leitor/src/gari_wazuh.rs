@@ -207,6 +207,7 @@ pub fn start_wazuh_listener(
 /*
  * Abre stream contínuo do alerts.json
  * Tolerante a UTF-8 inválido
+ * e linhas parcialmente escritas
  */
 fn open_stream(
     path: &str
@@ -254,10 +255,36 @@ fn open_stream(
                 let line =
                     line.trim();
 
-                if !line.is_empty() {
-
-                    handle_event(line);
+                /*
+                 * Ignora linhas vazias
+                 */
+                if line.is_empty() {
+                    continue;
                 }
+
+                /*
+                 * Ignora JSON incompleto
+                 * parcialmente escrito
+                 */
+                if !line.starts_with('{')
+                    || !line.ends_with('}')
+                {
+                    log_info!(
+                        "[Wazuh] JSON parcial ignorado"
+                    );
+
+                    continue;
+                }
+
+                /*
+                 * Pequeno delay para
+                 * evitar corrida de escrita
+                 */
+                thread::sleep(
+                    Duration::from_millis(50)
+                );
+
+                handle_event(line);
             }
 
             Err(e) => {
